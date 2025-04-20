@@ -45,7 +45,8 @@ jobs:
       # 3. Unit Testing (Functional Correctness)
       - name: Run Unit Tests
         run: pytest
-
+        env:
+          PYTHONPATH: ${{ github.workspace }} # Add the workspace root to Python's import path
       # 4. Secrets Scanning (Prevent Leaks)
       # Uses TruffleHog - many alternatives exist (Gitleaks, GitGuardian action, GitHub Native Secret Scanning)
       # GitHub Native Secret Scanning runs automatically on public repos & private repos with GHAS
