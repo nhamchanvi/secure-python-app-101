@@ -41,7 +41,7 @@ def test_hello_sanitization(client):
   response = client.get('/hello?name=<script>alert("xss")</script>')
   assert response.status_code == 200
   assert b"<script>" not in response.data # Check that '<' was escaped
-  assert b"Hello, &lt;script&gt;alert(&#34;xss&#34;)&lt;/script&gt;!" in response.data
+  assert b'Hello, &lt;script&gt;alert("xss")&lt;/script&gt;!' in response.data
 
 def test_api_status(client):
     """Test the API status endpoint."""

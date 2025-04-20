@@ -1,5 +1,6 @@
 # app.py
 from flask import Flask, request, jsonify
+import html # Import the html module
 
 app = Flask(__name__)
 
@@ -12,16 +13,14 @@ def home():
 def hello():
   """Says hello, optionally using a name query parameter."""
   name = request.args.get('name', 'World')
-  # Basic input sanitization example (though minimal)
-  name = name.replace('<', '&lt;').replace('>', '&gt;')
-  return f"<h1>Hello, {name}!</h1>"
+  # Use html.escape for proper sanitization
+  name = html.escape(name)
+  return f"<h1>Hello, {name}!</h1>" # Use f-string formatting
 
 @app.route('/api/status')
 def api_status():
     """A simple API endpoint."""
     return jsonify({"status": "OK", "service": "Simple Web App"})
 
-# This is useful for running locally with `python app.py`
-# For production/containers, a WSGI server like Gunicorn is better (see Dockerfile)
 if __name__ == '__main__':
   app.run(debug=True, host='0.0.0.0', port=5000)
