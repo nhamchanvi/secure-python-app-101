@@ -1,0 +1,181 @@
+name: DevSecOps Full Cycle Pipeline
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch: # Allows manual triggering
+
+# Required permissions for security scanning and pushing to GHCR
+permissions:
+  contents: read
+  security-events: write # Required for CodeQL findings
+  packages: write      # Required for pushing to GHCR
+  actions: read        # Required for Dependency Review API
+
+jobs:
+  build-scan-deploy:
+    name: Build, Scan, and Deploy
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # 1. Setup Environment (Example: Python)
+      # Replace with actions/setup-node, actions/setup-java etc. if needed
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          # Install linters/formatters/test tools if not in requirements.txt
+          pip install flake8 pytest bandit # Example Python tools
+
+      # 2. Linting & Formatting Check (Early Feedback)
+      - name: Lint with Flake8
+        run: flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics
+        # Add other linters/formatters like Black, ESLint, etc.
+
+      # 3. Unit Testing (Functional Correctness)
+      - name: Run Unit Tests
+        run: pytest
+
+      # 4. Secrets Scanning (Prevent Leaks)
+      # Uses TruffleHog - many alternatives exist (Gitleaks, GitGuardian action, GitHub Native Secret Scanning)
+      # GitHub Native Secret Scanning runs automatically on public repos & private repos with GHAS
+      - name: Scan for Secrets with TruffleHog
+        uses: trufflesecurity/trufflehog@main
+        with:
+          path: ./
+          base: ${{ github.event.repository.default_branch }} # Compare against default branch
+          head: HEAD
+          extra_args: --debug --only-verified # Adjust args as needed
+
+      # 5. SAST - Static Application Security Testing (Code Analysis)
+      # Using GitHub's CodeQL - requires GHAS for private repos
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v3
+        with:
+          languages: python # Specify languages: javascript, java, csharp, cpp, go, ruby, swift
+          # config-file: ./.github/codeql/codeql-config.yml # Optional custom config
+
+      # Autobuild attempts to build any compiled languages. Usually not needed for interpreted languages like Python/JS
+      # but doesn't hurt. If you have build steps, put them here.
+      # - name: Autobuild
+      #   uses: github/codeql-action/autobuild@v3
+
+      # Example step if manual build is needed (e.g., Java with Maven/Gradle)
+      # - name: Perform custom build (if needed by CodeQL)
+      #   run: |
+      #     # Your build command here, e.g., mvn clean install -DskipTests
+      #     echo "Running build steps if needed for CodeQL analysis..."
+
+      - name: Perform CodeQL Analysis
+        uses: github/codeql-action/analyze@v3
+
+      # 6. SCA - Software Composition Analysis (Dependency Check)
+      # Option A: GitHub Dependency Review Action (Checks PRs against known vulns)
+      - name: Dependency Review
+        if: github.event_name == 'pull_request' # Typically run on PRs
+        uses: actions/dependency-review-action@v4
+        with:
+            # Severity level options: low, moderate, high, critical
+            fail-on-severity: high # Fail PR if high or critical vulns found
+            # You can also allow/deny specific licenses or packages
+
+      # Option B: SCA using tools like Trivy (can scan lock files) or Snyk, OWASP Dependency-Check
+      # Example using Trivy to scan requirements.txt (adapt for package-lock.json, pom.xml etc.)
+      - name: Scan Dependencies with Trivy
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: 'fs' # Filesystem scan
+          scan-ref: '.'
+          format: 'table'
+          output: 'trivy-dependency-results.md'
+          ignore-unfixed: true # Optional: Don't fail on vulns with no fix
+          severity: 'HIGH,CRITICAL' # Fail on HIGH or CRITICAL
+          exit-code: '1' # Fail workflow if vulnerabilities are found matching severity
+          # Add specific target file if needed: trivy fs --severity HIGH,CRITICAL --exit-code 1 requirements.txt
+
+      # 7. Build Docker Image (Only on push to main, after checks pass)
+      - name: Set up Docker Buildx
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to GitHub Container Registry (GHCR)
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }} # Use the built-in GITHUB_TOKEN
+
+      - name: Build Docker Image
+        id: build_image # Give step an ID to reference its outputs
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./Dockerfile
+          # Example tag: ghcr.io/OWNER/REPO:latest or ghcr.io/OWNER/REPO:${{ github.sha }}
+          tags: ghcr.io/${{ github.repository_owner }}/${{ github.event.repository.name }}:${{ github.sha }}
+          push: false # Build only, don't push yet. We scan first.
+          load: true # Load image into Docker daemon for scanning
+
+      # 8. Container Image Scanning (Scan the built image)
+      - name: Scan Docker Image with Trivy
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: 'ghcr.io/${{ github.repository_owner }}/${{ github.event.repository.name }}:${{ github.sha }}'
+          format: 'table'
+          output: 'trivy-image-scan-results.md'
+          ignore-unfixed: true
+          vuln-type: 'os,library' # Scan OS packages and application dependencies
+          severity: 'HIGH,CRITICAL'
+          exit-code: '1' # Fail workflow if vulnerabilities found
+
+      # 9. Push Docker Image (Only if Build and Scan Successful)
+      - name: Push Docker Image to GHCR
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.build_image.outcome == 'success' # Ensure previous steps passed
+        # Re-run build-push-action, this time with push: true
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./Dockerfile
+          tags: ghcr.io/${{ github.repository_owner }}/${{ github.event.repository.name }}:${{ github.sha }},ghcr.io/${{ github.repository_owner }}/${{ github.event.repository.name }}:latest # Tag with SHA and latest
+          push: true
+
+      # 10. (Conceptual) Deploy Step
+      # This part is highly dependent on your target environment (Kubernetes, AWS ECS, Azure App Service, Heroku etc.)
+      - name: Deploy to Staging/Production
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: |
+          echo "Deploying image ghcr.io/${{ github.repository_owner }}/${{ github.event.repository.name }}:${{ github.sha }}..."
+          # Add your deployment commands here
+          # Example: kubectl apply -f k8s-deployment.yml (after updating image tag)
+          # Example: aws ecs update-service --cluster <cluster-name> --service <service-name> --force-new-deployment
+          # Ensure you have configured credentials (e.g., using secrets.AWS_ACCESS_KEY_ID etc.)
+
+      # Consider adding artifact uploads for reports (Trivy, CodeQL Sarif etc.)
+      # - name: Upload Trivy Scan Reports
+      #   if: always() # Run even if previous steps fail
+      #   uses: actions/upload-artifact@v4
+      #   with:
+      #     name: trivy-scan-reports
+      #     path: |
+      #       trivy-dependency-results.md
+      #       trivy-image-scan-results.md
+
+      # - name: Upload CodeQL Scan Results (SARIF)
+      #   if: always()
+      #   uses: actions/upload-artifact@v4
+      #   with:
+      #       name: codeql-scan-results
+      #       path: ../results/codeql.sarif # Adjust path if needed

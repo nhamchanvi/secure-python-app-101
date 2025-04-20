@@ -1,0 +1,4 @@
+# requirements.txt
+Flask>=2.0.0   # The web framework
+gunicorn>=20.0.0 # WSGI server for running Flask in the container
+pytest>=7.0.0  # Testing framework
